@@ -160,6 +160,11 @@ CREATE TABLE spare_part (
 
 -- ---------------- 备件更换登记 ----------------
 -- qty > 0 且不得超过当时的库存；warning_flag=1 表示出库后库存低于安全库存
+-- client_token：客户端幂等令牌（唯一），同一次更换的重复点击 / 网络重试只留一条有效履历；
+--   旧客户端不带令牌，由服务端按 备件+机位+工单+数量+登记人 短窗自然键兜底，不锁死旧登记。
+-- source：登记来源（NEW_CLIENT / LEGACY_BOTH / LEGACY_ORDER_ONLY / LEGACY_TURBINE_ONLY / LEGACY_NONE）。
+--   只选工单时机位由工单归属补齐；机位与工单冲突的新登记一律拒绝，历史冲突行在页面实时标成「待核对」，
+--   只读出结论、不回写历史。
 CREATE TABLE part_replacement (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     part_id BIGINT NOT NULL,
@@ -169,14 +174,18 @@ CREATE TABLE part_replacement (
     unit_code VARCHAR(32),
     work_order_id BIGINT,
     order_no VARCHAR(32),
+    client_token VARCHAR(64),
+    source VARCHAR(24),
     qty INT NOT NULL,
     replace_time DATETIME,
     operator VARCHAR(32),
     warning_flag TINYINT(1) DEFAULT 0,
     stock_after INT,
     note VARCHAR(128),
+    UNIQUE KEY uk_replace_client_token (client_token),
     KEY idx_replace_part (part_id),
-    KEY idx_replace_turbine (turbine_id)
+    KEY idx_replace_turbine (turbine_id),
+    KEY idx_replace_order (work_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------- 安全隔离点模板 ----------------

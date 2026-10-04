@@ -20,6 +20,16 @@ async function call (promise) {
   return body.data
 }
 
+// 同 call，但把后端 message 一并带出（更换登记需要区分正常 / 工单补齐机位 / 幂等命中）
+async function callWithMessage (promise) {
+  const response = await promise
+  const body = response.data
+  if (!body || body.ok === false) {
+    throw new Error((body && body.message) || '请求失败')
+  }
+  return { data: body.data, message: body.message }
+}
+
 // ---------------- 风场 ----------------
 const farm = {
   list: () => call(http.get('/farm/list')),
@@ -80,7 +90,8 @@ const part = {
   remove: (id) => call(http.delete(`/part/${id}`)),
   replacements: (partId, turbineId) => call(http.get('/part/replacement', { params: { partId, turbineId } })),
   replacementVOs: (partId, turbineId) => call(http.get('/part/replacement/vo', { params: { partId, turbineId } })),
-  replace: (data) => call(http.post('/part/replacement', data))
+  replace: (data) => call(http.post('/part/replacement', data)),
+  replaceWithMessage: (data) => callWithMessage(http.post('/part/replacement', data))
 }
 
 // ---------------- 安全隔离票 ----------------

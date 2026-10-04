@@ -180,6 +180,36 @@ public final class Dict {
     /** 一次更换登记的数量上限 */
     public static final int MAX_REPLACE_QTY = 200;
 
+    // ---------------- 备件更换登记关联规则 ----------------
+    /** 只有「作业中」的工单才允许登记备件更换：待派未开工、待验收已停止领用、已闭环封档 */
+    public static final String REPLACE_ORDER_STATUS = "WORKING";
+
+    /** 旧客户端自然键幂等兜底的去重窗口（秒）：超过窗口的同内容登记视为正常的连续更换 */
+    public static final int REPLACE_DEDUP_WINDOW_SECONDS = 120;
+
+    /** 登记来源：新客户端显式确认 / 旧请求的四种兼容形态 */
+    public static final String SOURCE_NEW = "NEW_CLIENT";
+    public static final String SOURCE_LEGACY_BOTH = "LEGACY_BOTH";
+    public static final String SOURCE_LEGACY_ORDER_ONLY = "LEGACY_ORDER_ONLY";
+    public static final String SOURCE_LEGACY_TURBINE_ONLY = "LEGACY_TURBINE_ONLY";
+    public static final String SOURCE_LEGACY_NONE = "LEGACY_NONE";
+
+    private static final Map<String, String> REPLACE_SOURCE = Map.of(
+            SOURCE_NEW, "本次登记（机位已确认）",
+            SOURCE_LEGACY_BOTH, "旧版登记（机位+工单）",
+            SOURCE_LEGACY_ORDER_ONLY, "旧版登记（机位由工单补齐）",
+            SOURCE_LEGACY_TURBINE_ONLY, "旧版登记（仅机位）",
+            SOURCE_LEGACY_NONE, "旧版登记（未关联机位/工单）");
+
+    /** 工单是否允许登记备件更换：只有作业中可以，避免登记到待派 / 待验收 / 已闭环工单上污染履历 */
+    public static boolean isOrderAcceptingReplacement(String status) {
+        return REPLACE_ORDER_STATUS.equals(status);
+    }
+
+    public static String replacementSourceName(String source) {
+        return source == null ? "历史登记" : REPLACE_SOURCE.getOrDefault(source, source);
+    }
+
     // ---------------- 取值方法 ----------------
 
     public static boolean isValidTimeZone(String zone) {

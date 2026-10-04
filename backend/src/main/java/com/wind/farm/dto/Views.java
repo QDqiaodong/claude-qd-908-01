@@ -198,6 +198,22 @@ public class Views {
         private Boolean warningFlag;
         private Integer stockAfter;
         private String note;
+        /** 登记来源（新客户端 / 旧版兼容形态）及中文名 */
+        private String source;
+        private String sourceName;
+        /**
+         * 实时核对结论：false=正常；true=待核对。
+         * 按当前工单、机位实时计算——关联对象已删除 / 机位与工单归属不一致 / 机位编号对不上，
+         * 都必须显式标成待核对，不能静默改写历史。
+         */
+        private Boolean pendingCheck;
+        /** 待核对原因（人能直接照着重选的提示），正常为 null */
+        private String checkNote;
+        /** 当前工单真实所属机位编号（冲突时告诉登记人应该改成哪个机位） */
+        private String actualOrderUnitCode;
+        /** 关联工单当前状态 / 中文名（便于登记人判断工单是否仍可登记） */
+        private String orderStatus;
+        private String orderStatusName;
     }
 
     /** 隔离票在工单 / 机位列表里的简要信息 */

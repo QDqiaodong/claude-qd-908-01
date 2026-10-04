@@ -4,6 +4,7 @@ import com.wind.farm.common.ApiResponse;
 import com.wind.farm.domain.PartReplacement;
 import com.wind.farm.domain.SparePart;
 import com.wind.farm.dto.ReplacementRequest;
+import com.wind.farm.dto.ReplacementResult;
 import com.wind.farm.dto.SparePartRequest;
 import com.wind.farm.dto.Views.ReplacementVO;
 import com.wind.farm.dto.Views.SparePartVO;
@@ -83,7 +84,21 @@ public class SparePartController {
     }
 
     @PostMapping("/replacement")
-    public ApiResponse<PartReplacement> replace(@RequestBody ReplacementRequest request) {
-        return ApiResponse.success("更换登记已完成", service.replace(request));
+    public ApiResponse<ReplacementResult> replace(@RequestBody ReplacementRequest request) {
+        ReplacementResult result = service.replace(request);
+        String message;
+        if (result.isDuplicated()) {
+            message = "该更换此前已登记成功，本次未重复扣减、未重复生成履历";
+        } else if (result.isTurbineFilledFromOrder()) {
+            message = "更换登记已完成；只选了工单，机位已按工单 " + nullToDash(result.getOrderNo())
+                    + " 自动补齐为 " + nullToDash(result.getUnitCode()) + "，请核对";
+        } else {
+            message = "更换登记已完成";
+        }
+        return ApiResponse.success(message, result);
+    }
+
+    private static String nullToDash(String value) {
+        return value == null ? "—" : value;
     }
 }

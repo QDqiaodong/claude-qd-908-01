@@ -27,9 +27,24 @@ const replacements = ref([])
 const category = ref('')
 const step = ref(1)
 const dialog = ref(false)
-
-const replaceForm = ref({ partId: null, turbineId: null, workOrderId: null, qty: 1, operator: '', note: '' })
+// 提交在途标记：防止双击 / 网络重试时同一张表单发两笔（与服务端令牌幂等双保险）
+const submitting = ref(false)
+// 服务端校验失败后需要修正的问题（机位 / 工单 / 余量），展示在表单上方让用户改完继续
+const formError = ref('')
+// 本次登记的幂等令牌：一次填写生成一个，重试沿用；成功后换新令牌
+const replaceForm = ref(emptyReplaceForm())
 const form = ref(emptyForm())
+
+function uuid () {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID()
+  }
+  return 'rt-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)
+}
+
+function emptyReplaceForm () {
+  return { partId: null, turbineId: null, workOrderId: null, clientToken: uuid(), qty: 1, operator: '', note: '' }
+}
 
 function emptyForm () {
   return {
@@ -49,6 +64,43 @@ function emptyForm () {
 
 const lowCount = computed(() => parts.value.filter((p) => p.lowStock).length)
 const warnCount = computed(() => replacements.value.filter((r) => r.warningFlag).length)
+// 冲突 / 失配的旧登记：必须显式待核对，不静默改写
+const pendingCount = computed(() => replacements.value.filter((r) => r.pendingCheck).length)
+const pendingRows = computed(() => replacements.value.filter((r) => r.pendingCheck))
+
+// 选中的工单 / 机位，用于前端即时联动（仅为减少误选；最终裁决一律在服务端）
+const selectedOrder = computed(() => orders.value.find((o) => o.id === replaceForm.value.workOrderId) || null)
+const selectedTurbine = computed(() => turbines.value.find((t) => t.id === replaceForm.value.turbineId) || null)
+
+// 只选工单时，页面明确提示「机位将由工单补齐」为哪个机位，不做隐式填值
+const orderTurbineCode = computed(() => selectedOrder.value?.unitCode || '')
+const turbineFilledByOrder = computed(() =>
+  !!selectedOrder.value && replaceForm.value.turbineId == null)
+
+// 机位与工单是否冲突（同传不一致）：提交前先在页面拦截并指出应改选谁
+const associationConflict = computed(() => {
+  const o = selectedOrder.value
+  const t = selectedTurbine.value
+  return !!(o && t && o.turbineId !== t.id)
+})
+
+// 选中备件实时库存（失败方刷新后看到真实余量）
+const selectedPartStock = computed(() => {
+  const p = parts.value.find((x) => x.id === replaceForm.value.partId)
+  return p ? { stock: p.stockQty, unit: p.unit, code: p.partCode } : null
+})
+const overStock = computed(() =>
+  selectedPartStock.value && Number(replaceForm.value.qty) > Number(selectedPartStock.value.stock))
+
+// 仅作业中的工单允许登记备件更换
+function orderSelectable (o) {
+  return o.status === 'WORKING'
+}
+
+// 待核对旧记录整行标红，避免淹没在正常履历里
+function replacementRowClass ({ row }) {
+  return row.pendingCheck ? 'replacement-pending-row' : ''
+}
 
 function barMax (p) {
   return Math.max(Number(p.safetyStock || 0) * 2, Number(p.stockQty || 0) * 1.15, 1)
@@ -61,10 +113,17 @@ function markPct (p) {
 }
 
 async function load () {
-  parts.value = await api.part.vo(category.value || null)
-  turbines.value = await api.turbine.grid(props.farmId)
-  orders.value = await api.workorder.kanban(props.farmId)
-  replacements.value = await api.part.replacementVOs()
+  // 重新拉取真实库存 / 工单状态 / 履历，失败方刷新即看到已生效操作与真实剩余量
+  const [p, t, o, r] = await Promise.all([
+    api.part.vo(category.value || null),
+    api.turbine.grid(props.farmId),
+    api.workorder.kanban(props.farmId),
+    api.part.replacementVOs()
+  ])
+  parts.value = p
+  turbines.value = t
+  orders.value = o
+  replacements.value = r
 }
 
 async function changeStock (p, delta) {
@@ -76,14 +135,75 @@ async function changeStock (p, delta) {
   }
 }
 
+// 选工单：机位保持为空时由后端按工单补齐（页面上即时回显补齐目标），用户也可显式选定机位
+function onOrderChange () {
+  formError.value = ''
+}
+function onTurbineChange () {
+  formError.value = ''
+}
+
+// 一键把机位改选为工单所属机位
+function fixTurbineToOrder () {
+  if (selectedOrder.value) {
+    replaceForm.value.turbineId = selectedOrder.value.turbineId
+    formError.value = ''
+  }
+}
+// 一键清空与当前机位冲突的工单，改选该机位下作业中的工单
+function clearOrder () {
+  replaceForm.value.workOrderId = null
+  formError.value = ''
+}
+
 async function submitReplace () {
+  if (submitting.value) return
+  formError.value = ''
+  // 前端即时提示（不是唯一闸门，服务端会重新核对）
+  if (!replaceForm.value.partId) {
+    formError.value = '请先选择要更换的备件'
+    return
+  }
+  if (replaceForm.value.turbineId == null && replaceForm.value.workOrderId == null) {
+    formError.value = '请至少选择机位或关联工单（只选工单时机位将由工单自动补齐并回显）'
+    return
+  }
+  if (associationConflict.value) {
+    formError.value = `机位与工单不属于同一台机组：工单 ${selectedOrder.value.orderNo} 属于机位 ${selectedOrder.value.unitCode}，当前机位是 ${selectedTurbine.value.unitCode}。请把机位改选为 ${selectedOrder.value.unitCode}，或改选该工单。`
+    return
+  }
+  if (selectedOrder.value && !orderSelectable(selectedOrder.value)) {
+    formError.value = `工单 ${selectedOrder.value.orderNo} 当前为「${selectedOrder.value.statusName}」，只有作业中的工单才能登记备件，请改选机位 ${selectedOrder.value.unitCode} 下作业中的工单。`
+    return
+  }
+  if (overStock.value) {
+    formError.value = `备件 ${selectedPartStock.value.code} 当前库存仅 ${selectedPartStock.value.stock} ${selectedPartStock.value.unit}，本次数量超出，请刷新后按真实余量登记。`
+    return
+  }
+
+  const payload = {
+    partId: replaceForm.value.partId,
+    turbineId: replaceForm.value.turbineId ?? null,
+    workOrderId: replaceForm.value.workOrderId ?? null,
+    // 幂等令牌随重试沿用；同一次更换只可能落一条履历
+    clientToken: replaceForm.value.clientToken,
+    qty: Number(replaceForm.value.qty),
+    operator: replaceForm.value.operator,
+    note: replaceForm.value.note
+  }
+  submitting.value = true
   try {
-    await api.part.replace(replaceForm.value)
-    ElMessage.success('更换登记已完成')
-    replaceForm.value = { partId: null, turbineId: null, workOrderId: null, qty: 1, operator: '', note: '' }
+    const { message } = await api.part.replaceWithMessage(payload)
+    ElMessage.success(message || '更换登记已完成')
+    replaceForm.value = emptyReplaceForm()
     await load()
   } catch (e) {
-    ElMessage.error(e.message)
+    // 明确指出应修正的机位 / 工单 / 余量，保留表单让用户改完继续
+    formError.value = e.message
+    // 冲突 / 库存被并发改过时，拉取真实库存与已生效履历
+    await load()
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -127,6 +247,7 @@ watch(() => props.farmId, load)
       <span class="chip">备件 {{ parts.length }} 种</span>
       <span class="chip" :class="{ warn: lowCount > 0 }">低库存 {{ lowCount }}</span>
       <span class="chip" :class="{ bad: warnCount > 0 }">预警更换 {{ warnCount }}</span>
+      <span class="chip" :class="{ bad: pendingCount > 0 }">待核对 {{ pendingCount }}</span>
       <el-select v-model="category" size="small" clearable placeholder="全部分类" style="width: 140px" @change="load">
         <el-option v-for="c in CATEGORIES" :key="c.value" :value="c.value" :label="c.label" />
       </el-select>
@@ -178,41 +299,140 @@ watch(() => props.farmId, load)
     <div class="panel">
       <div class="panel-head">
         <span class="panel-title">更换登记</span>
-        <span class="panel-sub">数量不得超过当前库存；出库后低于安全库存会自动打预警标记</span>
+        <span class="panel-sub">
+          机位与工单必须属于同一台机组；只选工单时机位按工单自动补齐；仅作业中工单可登记；
+          数量不得超过当前库存，出库后低于安全库存会自动打预警
+        </span>
       </div>
-      <el-form :inline="true" size="small">
+
+      <!-- 服务端 / 前端核对不通过：指出应修正的机位或工单，改完继续 -->
+      <el-alert
+        v-if="formError"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin: 8px 12px"
+      >
+        <div>{{ formError }}</div>
+        <div v-if="associationConflict" style="margin-top: 6px; display: flex; gap: 8px">
+          <el-button size="small" type="primary" @click="fixTurbineToOrder">
+            把机位改选为 {{ selectedOrder.unitCode }}
+          </el-button>
+          <el-button size="small" @click="clearOrder">改选该机位下的工单</el-button>
+        </div>
+      </el-alert>
+
+      <el-form :inline="true" size="small" style="padding: 0 12px">
         <el-form-item label="备件">
-          <el-select v-model="replaceForm.partId" style="width: 250px">
+          <el-select v-model="replaceForm.partId" style="width: 250px" @change="formError = ''">
             <el-option v-for="p in parts" :key="p.id" :value="p.id"
               :label="`${p.partCode} ${p.partName}（库存 ${p.stockQty}${p.unit}）`" />
           </el-select>
         </el-form-item>
         <el-form-item label="机位">
-          <el-select v-model="replaceForm.turbineId" clearable style="width: 170px">
+          <el-select v-model="replaceForm.turbineId" clearable placeholder="留空则由工单补齐"
+            style="width: 190px" @change="onTurbineChange">
             <el-option v-for="t in turbines" :key="t.id" :value="t.id" :label="`${t.unitCode} ${t.unitName}`" />
           </el-select>
         </el-form-item>
         <el-form-item label="关联工单">
-          <el-select v-model="replaceForm.workOrderId" clearable style="width: 200px">
-            <el-option v-for="o in orders" :key="o.id" :value="o.id" :label="`${o.orderNo} ${o.title}`" />
+          <el-select v-model="replaceForm.workOrderId" clearable style="width: 260px" @change="onOrderChange">
+            <el-option
+              v-for="o in orders"
+              :key="o.id"
+              :value="o.id"
+              :disabled="!orderSelectable(o)"
+              :label="`${o.orderNo} ${o.title}｜${o.unitCode}｜${o.statusName}${orderSelectable(o) ? '' : '（不可登记）'}`"
+            />
           </el-select>
         </el-form-item>
-        <el-form-item label="数量"><el-input-number v-model="replaceForm.qty" :min="1" :max="200" /></el-form-item>
-        <el-form-item label="更换人"><el-input v-model="replaceForm.operator" style="width: 120px" /></el-form-item>
-        <el-form-item><el-button type="primary" @click="submitReplace">登记更换</el-button></el-form-item>
+        <el-form-item label="数量">
+          <el-input-number v-model="replaceForm.qty" :min="1" :max="200" />
+        </el-form-item>
+        <el-form-item label="更换人">
+          <el-input v-model="replaceForm.operator" style="width: 120px" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="submitting"
+            :disabled="associationConflict || overStock" @click="submitReplace">
+            登记更换
+          </el-button>
+        </el-form-item>
       </el-form>
+
+      <!-- 实时联动提示（提交前） -->
+      <div style="padding: 0 12px 10px; font-size: 12px; line-height: 1.7">
+        <el-alert
+          v-if="associationConflict"
+          type="error"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 6px"
+          :title="`机位 ${selectedTurbine.unitCode} 与工单 ${selectedOrder.orderNo}（属于机位 ${selectedOrder.unitCode}）冲突，必须改选一致后才能提交`"
+        />
+        <el-alert
+          v-else-if="turbineFilledByOrder"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 6px"
+          :title="`未单独选机位，将按工单补齐为机位 ${orderTurbineCode}；若工单与实际作业机位不符，请改选机位或工单`"
+        />
+        <el-alert
+          v-if="selectedOrder && orderSelectable(selectedOrder)"
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 6px"
+          :title="`工单 ${selectedOrder.orderNo} 属于机位 ${selectedOrder.unitCode}（作业中，可登记）`"
+        />
+        <el-alert
+          v-if="overStock"
+          type="error"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 6px"
+          :title="`本次数量 ${replaceForm.qty} 超过当前库存 ${selectedPartStock.stock} ${selectedPartStock.unit}，请刷新后按真实余量登记`"
+        />
+      </div>
     </div>
 
     <div class="panel">
-      <div class="panel-head"><span class="panel-title">更换记录</span></div>
-      <el-table :data="replacements" size="small" max-height="300">
+      <div class="panel-head">
+        <span class="panel-title">更换记录</span>
+        <span class="panel-sub">关联核对按当前机位 / 工单实时判定；冲突旧数据标记「待核对」，不静默改写历史</span>
+      </div>
+
+      <el-alert
+        v-for="r in pendingRows"
+        :key="'pending-' + r.id"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin: 8px 12px"
+        :title="`待核对：${r.partCode}（${r.replaceTime}）— ${r.checkNote}`"
+      />
+
+      <el-table :data="replacements" size="small" max-height="300" :row-class-name="replacementRowClass">
         <el-table-column prop="partCode" label="备件编号" width="130" />
-        <el-table-column prop="partName" label="名称" min-width="150" />
+        <el-table-column prop="partName" label="名称" min-width="140" />
         <el-table-column prop="unitCode" label="机位" width="80" />
-        <el-table-column prop="orderNo" label="工单" width="130" />
+        <el-table-column label="工单" width="170">
+          <template #default="{ row }">
+            <div>{{ row.orderNo || '—' }}</div>
+            <div v-if="row.orderStatusName" style="font-size: 11px; color: #909399">{{ row.orderStatusName }}</div>
+          </template>
+        </el-table-column>
         <el-table-column prop="qty" label="数量" width="70" />
         <el-table-column prop="replaceTime" label="更换时间" width="150" />
-        <el-table-column prop="operator" label="更换人" width="130" />
+        <el-table-column prop="operator" label="更换人" width="120" />
+        <el-table-column label="关联核对" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.pendingCheck ? 'danger' : 'success'">
+              {{ row.pendingCheck ? '待核对' : '正常' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="预警" width="80">
           <template #default="{ row }">
             <el-tag size="small" :type="row.warningFlag ? 'danger' : 'success'">
@@ -220,8 +440,13 @@ watch(() => props.farmId, load)
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="stockAfter" label="剩余" width="80" />
-        <el-table-column prop="note" label="说明" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="stockAfter" label="剩余" width="70" />
+        <el-table-column prop="sourceName" label="来源" width="150" />
+        <el-table-column label="说明" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.pendingCheck ? row.checkNote : row.note }}
+          </template>
+        </el-table-column>
       </el-table>
     </div>
 
@@ -249,3 +474,12 @@ watch(() => props.farmId, load)
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+:deep(.el-table .replacement-pending-row) {
+  background-color: #fef0f0;
+}
+:deep(.el-table .replacement-pending-row:hover > td) {
+  background-color: #fde2e2 !important;
+}
+</style>

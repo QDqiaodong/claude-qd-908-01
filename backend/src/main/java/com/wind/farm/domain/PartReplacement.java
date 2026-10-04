@@ -48,6 +48,22 @@ public class PartReplacement {
     @Column(name = "order_no", length = 32)
     private String orderNo;
 
+    /**
+     * 客户端幂等令牌：同一次更换（表单生成一次，重试沿用同一值）只允许落一条有效履历。
+     * 旧客户端不带该字段，按自然键短窗兜底，不锁死旧登记。
+     */
+    @Column(name = "client_token", unique = true, length = 64)
+    private String clientToken;
+
+    /**
+     * 登记来源：NEW_CLIENT 新客户端显式确认；LEGACY_BOTH 旧请求同时带机位 / 工单；
+     * LEGACY_ORDER_ONLY 旧请求只带工单（机位由工单补齐）；
+     * LEGACY_TURBINE_ONLY 旧请求只带机位；LEGACY_NONE 旧请求两者都没带。
+     * 历史数据为空时按「历史登记」展示，不回写、不锁死。
+     */
+    @Column(name = "source", length = 24)
+    private String source;
+
     /** 更换数量，必须 > 0 且不得超过当前库存 */
     @Column(name = "qty", nullable = false)
     private Integer qty;
