@@ -40,9 +40,19 @@ const turbineStat = ref(null)
 const openTicketOrder = ref(null)
 
 const logForm = ref(emptyLogForm())
-const replaceForm = ref({ partId: null, qty: 1, operator: '', note: '' })
+const replaceForm = ref(emptyReplaceForm())
+const replacing = ref(false)
 const dialog = ref(false)
 const form = ref(emptyForm())
+
+// 每次登记生成一个幂等键：网络重试 / 重复点击沿用同一个，服务端保证同一次更换只留一条履历
+function newRequestId () {
+  return 'rp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+}
+
+function emptyReplaceForm () {
+  return { partId: null, qty: 1, operator: '', note: '', requestId: newRequestId() }
+}
 
 function emptyForm () {
   return {
@@ -89,7 +99,7 @@ async function openCard (turbine) {
   overlay.value = true
   logForm.value = emptyLogForm()
   logForm.value.recordTime = nowIso(offsetOf(turbine.farmId))
-  replaceForm.value = { partId: null, qty: 1, operator: '', note: '' }
+  replaceForm.value = emptyReplaceForm()
   await loadOverlay()
 }
 
@@ -167,20 +177,32 @@ async function advance (order) {
 }
 
 async function submitReplace () {
+  if (replacing.value) return
+  replacing.value = true
   try {
     await api.part.replace({
       partId: replaceForm.value.partId,
       turbineId: current.value.id,
       qty: replaceForm.value.qty,
       operator: replaceForm.value.operator,
-      note: replaceForm.value.note
+      note: replaceForm.value.note,
+      requestId: replaceForm.value.requestId
     })
     ElMessage.success('更换登记已完成')
-    replaceForm.value = { partId: null, qty: 1, operator: '', note: '' }
+    replaceForm.value = emptyReplaceForm()
     parts.value = await api.part.vo()
     await loadOverlay()
   } catch (e) {
+    // 失败（含并发被拦）：重新拉取真实剩余量与已生效履历
     ElMessage.error(e.message)
+    try {
+      parts.value = await api.part.vo()
+      await loadOverlay()
+    } catch {
+      // 刷新失败不掩盖原始错误提示
+    }
+  } finally {
+    replacing.value = false
   }
 }
 
@@ -483,7 +505,7 @@ watch(() => props.farmId, () => {
                 </el-form-item>
                 <el-form-item label="数量"><el-input-number v-model="replaceForm.qty" :min="1" :max="200" /></el-form-item>
                 <el-form-item label="更换人"><el-input v-model="replaceForm.operator" style="width: 110px" /></el-form-item>
-                <el-form-item><el-button type="primary" @click="submitReplace">登记更换</el-button></el-form-item>
+                <el-form-item><el-button type="primary" :loading="replacing" @click="submitReplace">登记更换</el-button></el-form-item>
               </el-form>
             </div>
             <div class="panel">
@@ -499,6 +521,14 @@ watch(() => props.farmId, () => {
                     <el-tag size="small" :type="row.warningFlag ? 'danger' : 'success'">
                       {{ row.warningFlag ? '预警' : '正常' }}
                     </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="核对" width="90">
+                  <template #default="{ row }">
+                    <el-tooltip v-if="row.reviewFlag" :content="row.reviewNote" placement="top">
+                      <el-tag size="small" type="danger">待核对</el-tag>
+                    </el-tooltip>
+                    <span v-else>—</span>
                   </template>
                 </el-table-column>
                 <el-table-column prop="stockAfter" label="剩余库存" width="90" />

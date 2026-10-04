@@ -27,9 +27,19 @@ const replacements = ref([])
 const category = ref('')
 const step = ref(1)
 const dialog = ref(false)
+const replacing = ref(false)
 
-const replaceForm = ref({ partId: null, turbineId: null, workOrderId: null, qty: 1, operator: '', note: '' })
+const replaceForm = ref(emptyReplaceForm())
 const form = ref(emptyForm())
+
+// 每次登记生成一个幂等键：网络重试 / 重复点击沿用同一个，服务端保证同一次更换只留一条履历
+function newRequestId () {
+  return 'rp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+}
+
+function emptyReplaceForm () {
+  return { partId: null, turbineId: null, workOrderId: null, qty: 1, operator: '', note: '', requestId: newRequestId() }
+}
 
 function emptyForm () {
   return {
@@ -49,6 +59,18 @@ function emptyForm () {
 
 const lowCount = computed(() => parts.value.filter((p) => p.lowStock).length)
 const warnCount = computed(() => replacements.value.filter((r) => r.warningFlag).length)
+const reviewCount = computed(() => replacements.value.filter((r) => r.reviewFlag).length)
+
+// 机位与工单同时选择时的冲突提示（仅提示，权威校验在服务端；任何冲突都会被拒绝登记）
+const replaceConflict = computed(() => {
+  const o = orders.value.find((x) => x.id === replaceForm.value.workOrderId)
+  if (!o || !replaceForm.value.turbineId) return ''
+  if (o.turbineId === replaceForm.value.turbineId) return ''
+  const t = turbines.value.find((x) => x.id === replaceForm.value.turbineId)
+  const unitText = t ? `${t.unitCode} ${t.unitName}` : `id=${replaceForm.value.turbineId}`
+  return `工单 ${o.orderNo} 属于机位 ${o.unitCode}，与所选机位 ${unitText} 不一致：` +
+    `请把机位修正为 ${o.unitCode}，或改选 ${t ? t.unitCode : ''} 名下的工单后再登记`
+})
 
 function barMax (p) {
   return Math.max(Number(p.safetyStock || 0) * 2, Number(p.stockQty || 0) * 1.15, 1)
@@ -67,6 +89,16 @@ async function load () {
   replacements.value = await api.part.replacementVOs()
 }
 
+// 只选工单时由工单补齐机位（与服务端规则一致，减少重复选择）；
+// 已选机位不覆盖——机位与工单冲突必须拒绝，不能静默改值
+function onReplaceOrderChange (id) {
+  if (!id) return
+  const o = orders.value.find((x) => x.id === id)
+  if (o && !replaceForm.value.turbineId) {
+    replaceForm.value.turbineId = o.turbineId
+  }
+}
+
 async function changeStock (p, delta) {
   try {
     await api.part.stock(p.id, delta)
@@ -77,13 +109,23 @@ async function changeStock (p, delta) {
 }
 
 async function submitReplace () {
+  if (replacing.value) return
+  replacing.value = true
   try {
     await api.part.replace(replaceForm.value)
     ElMessage.success('更换登记已完成')
-    replaceForm.value = { partId: null, turbineId: null, workOrderId: null, qty: 1, operator: '', note: '' }
+    replaceForm.value = emptyReplaceForm()
     await load()
   } catch (e) {
+    // 失败（含并发被拦）：重新拉取真实剩余量与已生效履历，表单选择保留便于修正后继续
     ElMessage.error(e.message)
+    try {
+      await load()
+    } catch {
+      // 刷新失败不掩盖原始错误提示
+    }
+  } finally {
+    replacing.value = false
   }
 }
 
@@ -178,7 +220,7 @@ watch(() => props.farmId, load)
     <div class="panel">
       <div class="panel-head">
         <span class="panel-title">更换登记</span>
-        <span class="panel-sub">数量不得超过当前库存；出库后低于安全库存会自动打预警标记</span>
+        <span class="panel-sub">数量不得超过当前库存；出库后低于安全库存会自动打预警标记；只选工单时自动带出工单所属机位；机位与工单不一致会被拒绝并提示修正</span>
       </div>
       <el-form :inline="true" size="small">
         <el-form-item label="备件">
@@ -193,18 +235,26 @@ watch(() => props.farmId, load)
           </el-select>
         </el-form-item>
         <el-form-item label="关联工单">
-          <el-select v-model="replaceForm.workOrderId" clearable style="width: 200px">
-            <el-option v-for="o in orders" :key="o.id" :value="o.id" :label="`${o.orderNo} ${o.title}`" />
+          <el-select v-model="replaceForm.workOrderId" clearable style="width: 260px" @change="onReplaceOrderChange">
+            <el-option v-for="o in orders" :key="o.id" :value="o.id" :disabled="o.status === 'CLOSED'"
+              :label="`${o.orderNo} ${o.title}（${o.unitCode} · ${o.statusName}）`" />
           </el-select>
         </el-form-item>
         <el-form-item label="数量"><el-input-number v-model="replaceForm.qty" :min="1" :max="200" /></el-form-item>
         <el-form-item label="更换人"><el-input v-model="replaceForm.operator" style="width: 120px" /></el-form-item>
-        <el-form-item><el-button type="primary" @click="submitReplace">登记更换</el-button></el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="replacing" @click="submitReplace">登记更换</el-button>
+        </el-form-item>
       </el-form>
+      <el-alert v-if="replaceConflict" :title="replaceConflict" type="error" :closable="false" show-icon
+        style="margin-top: 4px" />
     </div>
 
     <div class="panel">
-      <div class="panel-head"><span class="panel-title">更换记录</span></div>
+      <div class="panel-head">
+        <span class="panel-title">更换记录</span>
+        <span class="panel-sub" v-if="reviewCount > 0">有 {{ reviewCount }} 条历史记录机位与工单不一致，标记为「待核对」，请人工核实（系统未做改动）</span>
+      </div>
       <el-table :data="replacements" size="small" max-height="300">
         <el-table-column prop="partCode" label="备件编号" width="130" />
         <el-table-column prop="partName" label="名称" min-width="150" />
@@ -218,6 +268,14 @@ watch(() => props.farmId, load)
             <el-tag size="small" :type="row.warningFlag ? 'danger' : 'success'">
               {{ row.warningFlag ? '预警' : '正常' }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="核对" width="90">
+          <template #default="{ row }">
+            <el-tooltip v-if="row.reviewFlag" :content="row.reviewNote" placement="top">
+              <el-tag size="small" type="danger">待核对</el-tag>
+            </el-tooltip>
+            <span v-else>—</span>
           </template>
         </el-table-column>
         <el-table-column prop="stockAfter" label="剩余" width="80" />

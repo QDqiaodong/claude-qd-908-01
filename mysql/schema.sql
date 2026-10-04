@@ -160,6 +160,8 @@ CREATE TABLE spare_part (
 
 -- ---------------- 备件更换登记 ----------------
 -- qty > 0 且不得超过当时的库存；warning_flag=1 表示出库后库存低于安全库存
+-- request_id 是登记幂等键：网络重试 / 并发重复提交同一登记只留一条有效履历；
+-- 唯一索引 uk_replace_request 兜底，旧数据为 NULL（MySQL 唯一索引不约束 NULL）
 CREATE TABLE part_replacement (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     part_id BIGINT NOT NULL,
@@ -172,9 +174,11 @@ CREATE TABLE part_replacement (
     qty INT NOT NULL,
     replace_time DATETIME,
     operator VARCHAR(32),
+    request_id VARCHAR(64),
     warning_flag TINYINT(1) DEFAULT 0,
     stock_after INT,
     note VARCHAR(128),
+    UNIQUE KEY uk_replace_request (request_id),
     KEY idx_replace_part (part_id),
     KEY idx_replace_turbine (turbine_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -383,6 +387,8 @@ INSERT INTO spare_part (part_code, part_name, spec, category, unit, stock_qty, s
 
 -- ---------------- 备件更换登记 ----------------
 -- stock_after 与 spare_part 当前库存一致；warning_flag=1 表示出库后低于安全库存
+-- 最后一条是修复前 bug 留下的历史冲突数据（A02 的更换量记到了 A01 的工单上）：
+-- 页面必须显示为「待核对」，不得静默改写
 INSERT INTO part_replacement (part_id, part_code, part_name, turbine_id, unit_code, work_order_id, order_no, qty, replace_time, operator, warning_flag, stock_after, note) VALUES
 (4, 'SP-PITCH-001', '变桨电机', 5, 'B02', 2, 'WO-2026-0002', 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 10 HOUR, '抢修二班-刘强', 0, 5, '2 号机位变桨电机整体更换'),
 (7, 'SP-ELEC-002', '风速仪', 12, 'D03', 4, 'WO-2026-0004', 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 32 HOUR, '检修三班-周涛', 0, 9, '风速仪数据跳变更换'),
@@ -391,7 +397,8 @@ INSERT INTO part_replacement (part_id, part_code, part_name, turbine_id, unit_co
 (10, 'SP-FAST-001', '塔筒高强螺栓', 13, 'E01', NULL, NULL, 20, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 60 HOUR, '检修一班-孙磊', 0, 120, '塔筒法兰力矩复紧'),
 (8, 'SP-HYD-001', '液压站油管接头', 10, 'D01', 10, 'WO-2026-0010', 3, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 6 HOUR, '抢修一班-钱伟', 0, 18, '液压站渗油接头更换'),
 (1, 'SP-BLADE-001', '叶片前缘保护膜', 15, 'E03', NULL, NULL, 2, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 14 HOUR, '检修二班-马超', 0, 12, '叶片前缘保护膜整体更换'),
-(9, 'SP-HYD-002', '液压油', 1, 'A01', NULL, NULL, 2, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 36 HOUR, '检修一班-孙磊', 0, 14, '偏航液压系统换油');
+(9, 'SP-HYD-002', '液压油', 1, 'A01', NULL, NULL, 2, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 36 HOUR, '检修一班-孙磊', 0, 14, '偏航液压系统换油'),
+(6, 'SP-ELEC-001', '主控 PLC 模块', 2, 'A02', 6, 'WO-2026-0006', 1, UTC_TIMESTAMP() + INTERVAL 8 HOUR - INTERVAL 20 HOUR, '技术组-郑工', 0, 7, '旧系统登记：机位 A02 与工单 WO-2026-0006 所属机位 A01 不一致，待核对');
 
 -- ================= 安全隔离票闭环种子数据 =================
 -- 已闭环工单补验收结论（历史闭环数据自洽：验收合格 → 复电恢复 → 闭环）

@@ -2,16 +2,24 @@ package com.wind.farm.repository;
 
 import com.wind.farm.domain.WorkOrder;
 import com.wind.farm.dto.WorkOrderStatusDTO;
+import jakarta.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 public interface WorkOrderRepository extends JpaRepository<WorkOrder, Long> {
 
     boolean existsByOrderNo(String orderNo);
 
     Optional<WorkOrder> findByOrderNo(String orderNo);
+
+    /** 行锁读（SELECT ... FOR UPDATE）：更换登记期间锁定工单，防止状态 / 所属机位被并发改写 */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select w from WorkOrder w where w.id = :id")
+    Optional<WorkOrder> findWithLockById(@Param("id") Long id);
 
     List<WorkOrder> findAllByOrderByOrderNoAsc();
 

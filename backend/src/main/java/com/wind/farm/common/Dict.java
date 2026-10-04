@@ -284,6 +284,14 @@ public final class Dict {
         return next != null && next.contains(to);
     }
 
+    /**
+     * 工单是否可登记备件更换：待派 / 作业中 / 待验收 可登记；已闭环是终态，不允许再挂更换记录。
+     * 历史已闭环工单上的更换记录是登记时工单仍未闭环的合法数据，不受影响。
+     */
+    public static boolean isOrderRegistrable(String status) {
+        return "PENDING".equals(status) || "WORKING".equals(status) || "CHECKING".equals(status);
+    }
+
     /** 工单阶段推进提示 */
     public static String orderFlowHint(String from) {
         List<String> next = from == null ? null : ORDER_NEXT.get(from);

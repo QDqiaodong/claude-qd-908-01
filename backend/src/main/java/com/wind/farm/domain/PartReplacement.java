@@ -60,6 +60,10 @@ public class PartReplacement {
     @Column(name = "operator", length = 32)
     private String operator;
 
+    /** 幂等键：网络重试 / 并发重复提交同一登记时只留一条有效履历；旧数据为 NULL（唯一索引不约束 NULL） */
+    @Column(name = "request_id", length = 64, unique = true)
+    private String requestId;
+
     /** 预警标记：出库后库存低于安全库存时为 true */
     @Column(name = "warning_flag")
     private Boolean warningFlag;

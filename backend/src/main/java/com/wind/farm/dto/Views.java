@@ -192,11 +192,17 @@ public class Views {
         private String farmName;
         private Long workOrderId;
         private String orderNo;
+        /** 工单当前所属机位的编号（用于与登记机位对照展示） */
+        private String orderUnitCode;
         private Integer qty;
         private String replaceTime;
         private String operator;
         private Boolean warningFlag;
         private Integer stockAfter;
+        /** 历史冲突数据：登记机位与工单所属机位不一致（或工单已不存在）时为 true，页面显示「待核对」 */
+        private Boolean reviewFlag;
+        /** 待核对原因说明（未做静默改写，仅提示人工核对） */
+        private String reviewNote;
         private String note;
     }
 
